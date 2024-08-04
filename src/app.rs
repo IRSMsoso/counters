@@ -104,7 +104,7 @@ impl App {
     fn render_footer(&self, area: Rect, buf: &mut Buffer) {
         let description = match self.input_mode {
             InputMode::Normal => {
-                "Use ↓↑/jk to move, d to delete, ←→/as to change the counter, and q to exit."
+                "Use ↓↑/jk to move, d to delete, ←→/as to change the counter, n to make a new counter, and q to exit."
             }
             InputMode::Adding(_) => "Type a new counter name. Use enter to add and esc to return.",
         };
