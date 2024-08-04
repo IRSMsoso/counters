@@ -2,10 +2,10 @@ use std::io;
 use std::io::stdout;
 
 use ratatui::backend::{Backend, CrosstermBackend};
-use ratatui::crossterm::ExecutableCommand;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use ratatui::crossterm::ExecutableCommand;
 use ratatui::Terminal;
 
 pub fn init_terminal() -> io::Result<Terminal<impl Backend>> {

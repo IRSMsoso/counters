@@ -1,7 +1,3 @@
-use anyhow::Context;
-use ratatui::crossterm::ExecutableCommand;
-use ratatui::prelude::*;
-
 use crate::app::App;
 use crate::utils::{init_terminal, restore_terminal};
 

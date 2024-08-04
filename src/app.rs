@@ -3,8 +3,8 @@ use std::io;
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
-use ratatui::Terminal;
 use ratatui::widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListState, Paragraph};
+use ratatui::Terminal;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
@@ -61,16 +61,16 @@ impl App {
         }
         match &mut self.input_mode {
             InputMode::Normal => match key.code {
-                KeyCode::Up => self.counter_list.state.select_previous(),
-                KeyCode::Down => self.counter_list.state.select_next(),
-                KeyCode::Right => match self.counter_list.state.selected() {
+                KeyCode::Up | KeyCode::Char('k') => self.counter_list.state.select_previous(),
+                KeyCode::Down | KeyCode::Char('j') => self.counter_list.state.select_next(),
+                KeyCode::Right | KeyCode::Char('a') => match self.counter_list.state.selected() {
                     Some(index) => match self.counter_list.counters.get_mut(index) {
                         Some(counter) => counter.count += 1,
                         None => {}
                     },
                     None => {}
                 },
-                KeyCode::Left => match self.counter_list.state.selected() {
+                KeyCode::Left | KeyCode::Char('s') => match self.counter_list.state.selected() {
                     Some(index) => match self.counter_list.counters.get_mut(index) {
                         Some(counter) => counter.count -= 1,
                         None => {}
@@ -104,7 +104,7 @@ impl App {
     fn render_footer(&self, area: Rect, buf: &mut Buffer) {
         let description = match self.input_mode {
             InputMode::Normal => {
-                "Use ↓↑ to move, d to delete, ←→ to change the counter, and q to exit."
+                "Use ↓↑/jk to move, d to delete, ←→/as to change the counter, and q to exit."
             }
             InputMode::Adding(_) => "Type a new counter name. Use enter to add and esc to return.",
         };
@@ -122,8 +122,7 @@ impl App {
             .counter_list
             .counters
             .iter()
-            .enumerate()
-            .map(|(i, counter)| ListItem::from(counter))
+            .map(|counter| ListItem::from(counter))
             .collect();
 
         // Create a List from all list items and highlight the currently selected one
