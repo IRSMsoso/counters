@@ -1,5 +1,9 @@
+use std::env::current_dir;
+use std::fs::File;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use anyhow::Context;
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
@@ -7,6 +11,7 @@ use ratatui::widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListSta
 use ratatui::Terminal;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
+use serde::{Deserialize, Serialize};
 
 enum AddingModeSign {
     Positive,
@@ -17,6 +22,29 @@ enum InputMode {
     Normal,
     NewCounter(Input),
     Adding(Input, AddingModeSign),
+}
+
+#[derive(Serialize, Deserialize)]
+struct Counter {
+    name: String,
+    count: i64,
+}
+
+impl Counter {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            count: 0,
+        }
+    }
+}
+
+impl From<&Counter> for ListItem<'_> {
+    fn from(value: &Counter) -> Self {
+        let line = Line::styled(format!("{}: {}", value.count, value.name), Color::White);
+
+        ListItem::new(line)
+    }
 }
 
 struct CounterList {
@@ -33,63 +61,123 @@ impl Default for CounterList {
     }
 }
 
+
+enum SaveState {
+    DoNotSave,
+    Save(PathBuf)
+}
+
 pub(crate) struct App {
     counter_list: CounterList,
     input_mode: InputMode,
     should_exit: bool,
-}
-
-impl Default for App {
-    fn default() -> Self {
-        App {
-            counter_list: CounterList::default(),
-            input_mode: InputMode::Normal,
-            should_exit: false,
-        }
-    }
+    save_state: SaveState,
 }
 
 impl App {
-    pub(crate) fn run(&mut self, mut terminal: Terminal<impl Backend>) -> io::Result<()> {
-        while !self.should_exit {
-            //terminal.clear()?;
-            terminal.draw(|f| f.render_widget(&mut *self, f.size()))?;
-            if let Event::Key(key) = event::read()? {
-                self.handle_key(key);
-            };
+    pub(crate) fn make_temporary() -> Self {
+        Self {
+            counter_list: Default::default(),
+            input_mode: InputMode::Normal,
+            should_exit: false,
+            save_state: SaveState::DoNotSave,
         }
-        Ok(())
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    pub(crate) fn make_saved(input_name: &str) -> anyhow::Result<Self> {
+        let mut path = current_dir().context("Couldn't get working directory")?;
+        path.push(input_name);
+        path.set_extension("json");
+        let file_exists = Path::exists(&path);
+
+        Ok(if file_exists {
+            let file = File::open(&path).context(format!("Failed to open file: {}", path.display()))?;
+            let counters: Vec<Counter> = serde_json::from_reader(file).context(format!("Failed to parse file: {}", path.display()))?;
+
+            Self {
+                counter_list: CounterList{ counters, state: Default::default() },
+                input_mode: InputMode::Normal,
+                should_exit: false,
+                save_state: SaveState::Save(path),
+            }
+        }
+        else {
+            Self {
+                counter_list: CounterList::default(),
+                input_mode: InputMode::Normal,
+                should_exit: false,
+                save_state: SaveState::Save(path),
+            }
+        })
+    }
+
+    fn save(&self) -> anyhow::Result<()> {
+        let SaveState::Save(buf) = &self.save_state else {
+            return Ok(());
+        };
+
+        let file = File::create(buf).context(format!("Failed to open file: {}", buf.display()))?;
+
+        serde_json::to_writer_pretty(file, &self.counter_list.counters).context(format!("Failed to open file: {}", buf.display()))?;
+
+        Ok(())
+    }
+    
+    pub(crate) fn run(&mut self, mut terminal: Terminal<impl Backend>) -> io::Result<String> {
+        let mut end_message = String::new();
+
+        while !self.should_exit {
+            terminal.draw(|f| f.render_widget(&mut *self, f.size()))?;
+            if let Event::Key(key) = event::read()? {
+                match self.handle_key(key) {
+                    Ok(_) => {}
+                    Err(error) => {
+                        end_message = error.to_string();
+                    }
+                };
+            };
+        }
+        Ok(end_message)
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         if key.kind != KeyEventKind::Press {
-            return;
+            return Ok(());
         }
         match &mut self.input_mode {
             InputMode::Normal => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.counter_list.state.select_previous(),
                 KeyCode::Down | KeyCode::Char('j') => self.counter_list.state.select_next(),
-                KeyCode::Right | KeyCode::Char('l') => match self.counter_list.state.selected() {
-                    Some(index) => match self.counter_list.counters.get_mut(index) {
-                        Some(counter) => counter.count += 1,
+                KeyCode::Right | KeyCode::Char('l') => {
+                    match self.counter_list.state.selected() {
+                        Some(index) => match self.counter_list.counters.get_mut(index) {
+                            Some(counter) => counter.count += 1,
+                            None => {}
+                        },
                         None => {}
-                    },
-                    None => {}
+                    }
+                    self.save()?;
                 },
-                KeyCode::Left | KeyCode::Char(';') => match self.counter_list.state.selected() {
-                    Some(index) => match self.counter_list.counters.get_mut(index) {
-                        Some(counter) => counter.count -= 1,
+                KeyCode::Left | KeyCode::Char(';') => {
+                    match self.counter_list.state.selected() {
+                        Some(index) => match self.counter_list.counters.get_mut(index) {
+                            Some(counter) => counter.count -= 1,
+                            None => {}
+                        },
                         None => {}
-                    },
-                    None => {}
+                    }
+                    self.save()?;
                 },
                 KeyCode::Char('q') => self.should_exit = true,
                 KeyCode::Char('n') => self.input_mode = InputMode::NewCounter(Input::default()),
-                KeyCode::Char('d') => match self.counter_list.state.selected() {
-                    Some(index) => {
-                        self.counter_list.counters.remove(index);
+                KeyCode::Char('d') => {
+                    match self.counter_list.state.selected() {
+                        Some(index) => {
+                            self.counter_list.counters.remove(index);
+                        }
+                        None => {}
                     }
-                    None => {}
+                    self.save()?;
                 },
                 KeyCode::Esc => self.counter_list.state.select(None),
                 KeyCode::Char('a') => self.input_mode = InputMode::Adding(Input::default(), AddingModeSign::Positive),
@@ -101,6 +189,7 @@ impl App {
                 KeyCode::Enter => {
                     self.counter_list.counters.push(Counter::new(input.value()));
                     input.reset();
+                    self.save()?;
                 }
                 _ => {
                     input.handle_event(&Event::Key(key));
@@ -125,10 +214,11 @@ impl App {
                                     AddingModeSign::Positive => counter.count += value as i64,
                                     AddingModeSign::Negative => counter.count -= value as i64
                                 }
+                                input.reset();
+                                self.save()?;
                             }
                             None => {}
                         }
-                        input.reset();
                     },
                     None => {}
                 },
@@ -137,6 +227,7 @@ impl App {
                 _ => {}
             }
         }
+        Ok(())
     }
 
     fn render_footer(&self, area: Rect, buf: &mut Buffer) {
@@ -239,27 +330,5 @@ impl Widget for &mut App {
         }
 
         self.render_footer(footer_area, buf);
-    }
-}
-
-struct Counter {
-    name: String,
-    count: i64,
-}
-
-impl Counter {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            count: 0,
-        }
-    }
-}
-
-impl From<&Counter> for ListItem<'_> {
-    fn from(value: &Counter) -> Self {
-        let line = Line::styled(format!("{}: {}", value.count, value.name), Color::White);
-
-        ListItem::new(line)
     }
 }
