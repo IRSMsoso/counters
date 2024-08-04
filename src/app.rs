@@ -193,7 +193,7 @@ impl Counter {
 
 impl From<&Counter> for ListItem<'_> {
     fn from(value: &Counter) -> Self {
-        let line = Line::styled(format!("{}: {}", value.name, value.count), Color::White);
+        let line = Line::styled(format!("{}: {}", value.count, value.name), Color::White);
 
         ListItem::new(line)
     }
