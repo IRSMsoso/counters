@@ -1,5 +1,5 @@
 [package]
-name = "counters"
+name = "tui-counters"
 version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/IRSMsoso/tui-counters"
