@@ -1,5 +1,5 @@
 use std::io;
-
+use std::str::FromStr;
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
@@ -8,9 +8,15 @@ use ratatui::Terminal;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
+enum AddingModeSign {
+    Positive,
+    Negative
+}
+
 enum InputMode {
     Normal,
-    Adding(Input),
+    NewCounter(Input),
+    Adding(Input, AddingModeSign),
 }
 
 struct CounterList {
@@ -63,14 +69,14 @@ impl App {
             InputMode::Normal => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.counter_list.state.select_previous(),
                 KeyCode::Down | KeyCode::Char('j') => self.counter_list.state.select_next(),
-                KeyCode::Right | KeyCode::Char('a') => match self.counter_list.state.selected() {
+                KeyCode::Right | KeyCode::Char('l') => match self.counter_list.state.selected() {
                     Some(index) => match self.counter_list.counters.get_mut(index) {
                         Some(counter) => counter.count += 1,
                         None => {}
                     },
                     None => {}
                 },
-                KeyCode::Left | KeyCode::Char('s') => match self.counter_list.state.selected() {
+                KeyCode::Left | KeyCode::Char(';') => match self.counter_list.state.selected() {
                     Some(index) => match self.counter_list.counters.get_mut(index) {
                         Some(counter) => counter.count -= 1,
                         None => {}
@@ -78,7 +84,7 @@ impl App {
                     None => {}
                 },
                 KeyCode::Char('q') => self.should_exit = true,
-                KeyCode::Char('n') => self.input_mode = InputMode::Adding(Input::default()),
+                KeyCode::Char('n') => self.input_mode = InputMode::NewCounter(Input::default()),
                 KeyCode::Char('d') => match self.counter_list.state.selected() {
                     Some(index) => {
                         self.counter_list.counters.remove(index);
@@ -86,9 +92,11 @@ impl App {
                     None => {}
                 },
                 KeyCode::Esc => self.counter_list.state.select(None),
+                KeyCode::Char('a') => self.input_mode = InputMode::Adding(Input::default(), AddingModeSign::Positive),
+                KeyCode::Char('s') => self.input_mode = InputMode::Adding(Input::default(), AddingModeSign::Negative),
                 _ => {}
             },
-            InputMode::Adding(input) => match key.code {
+            InputMode::NewCounter(input) => match key.code {
                 KeyCode::Esc => self.input_mode = InputMode::Normal,
                 KeyCode::Enter => {
                     self.counter_list.counters.push(Counter::new(input.value()));
@@ -98,20 +106,54 @@ impl App {
                     input.handle_event(&Event::Key(key));
                 }
             },
+            InputMode::Adding(input, sign) => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.counter_list.state.select_previous(),
+                KeyCode::Down | KeyCode::Char('j') => self.counter_list.state.select_next(),
+                KeyCode::Char(char) if char.is_numeric() => {
+                    input.handle_event(&Event::Key(key));
+                },
+                KeyCode::Right | KeyCode::Left | KeyCode::Backspace => {
+                    input.handle_event(&Event::Key(key));
+                }
+                KeyCode::Esc => self.input_mode = InputMode::Normal,
+                KeyCode::Enter => match self.counter_list.state.selected() {
+                    Some(index) => {
+                        match self.counter_list.counters.get_mut(index) {
+                            Some(counter) => {
+                                let value = u64::from_str(input.value()).expect("String should only have numerics");
+                                match sign {
+                                    AddingModeSign::Positive => counter.count += value as i64,
+                                    AddingModeSign::Negative => counter.count -= value as i64
+                                }
+                            }
+                            None => {}
+                        }
+                        input.reset();
+                    },
+                    None => {}
+                },
+                KeyCode::Char('a') => self.input_mode = InputMode::Adding(input.clone(), AddingModeSign::Positive),
+                KeyCode::Char('s') => self.input_mode = InputMode::Adding(input.clone(), AddingModeSign::Negative),
+                _ => {}
+            }
         }
     }
 
     fn render_footer(&self, area: Rect, buf: &mut Buffer) {
-        let description = match self.input_mode {
+        let description = match &self.input_mode {
             InputMode::Normal => {
                 if self.counter_list.counters.is_empty() {
                     "Use n to make a new counter, and q to exit."
                 }
                 else {
-                    "Use ↓↑/jk to move, d to delete, ←→/as to change the counter, n to make a new counter, and q to exit."
+                    "Use ↓↑/jk to move, d to delete, ←→/l; to change the counter, n to make a new counter, and q to exit."
                 }
             }
-            InputMode::Adding(_) => "Type a new counter name. Use enter to add and esc to return.",
+            InputMode::NewCounter(_) => "Type a new counter name. Use enter to add and esc to return.",
+            InputMode::Adding(_, sign) => match sign {
+                AddingModeSign::Positive => "Use ↓↑/jk to move, Type numbers, then enter to add and esc to return",
+                AddingModeSign::Negative => "Use ↓↑/jk to move, Type numbers, then enter to subtract and esc to return",
+            }
         };
         Paragraph::new(description).centered().render(area, buf);
     }
@@ -143,14 +185,28 @@ impl App {
     }
 
     fn render_input(&mut self, area: Rect, buf: &mut Buffer) {
-        let block = Block::new()
-            .title(Line::raw("New Counter").centered())
-            .borders(Borders::all())
-            .border_set(symbols::border::ROUNDED);
-
         match &self.input_mode {
             InputMode::Normal => {}
-            InputMode::Adding(input) => {
+            InputMode::NewCounter(input) => {
+                let block = Block::new()
+                    .title(Line::raw("New Counter").centered())
+                    .borders(Borders::all())
+                    .border_set(symbols::border::ROUNDED);
+
+                Paragraph::new(input.value())
+                    .centered()
+                    .block(block)
+                    .render(area, buf);
+            }
+            InputMode::Adding(input, sign) => {
+                let block = Block::new()
+                    .title(Line::raw(match sign {
+                        AddingModeSign::Positive => "Adding",
+                        AddingModeSign::Negative => "Subtracting"
+                    }).centered())
+                    .borders(Borders::all())
+                    .border_set(symbols::border::ROUNDED);
+
                 Paragraph::new(input.value())
                     .centered()
                     .block(block)
@@ -172,7 +228,11 @@ impl Widget for &mut App {
             InputMode::Normal => {
                 self.render_list(main_area, buf);
             }
-            InputMode::Adding(_) => {
+            InputMode::NewCounter(_) => {
+                self.render_input(adding_area, buf);
+                self.render_list(list_area, buf);
+            }
+            InputMode::Adding(_, _) => {
                 self.render_input(adding_area, buf);
                 self.render_list(list_area, buf);
             }
