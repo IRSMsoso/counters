@@ -146,7 +146,7 @@ impl App {
                     "Use n to make a new counter, and q to exit."
                 }
                 else {
-                    "Use ↓↑/jk to move, d to delete, ←→/l; to change the counter, n to make a new counter, and q to exit."
+                    "Use ↓↑/jk to move, d to delete, ←→/l; to increment the counter, n to make a new counter, a/s to add/subtract, and q to exit."
                 }
             }
             InputMode::NewCounter(_) => "Type a new counter name. Use enter to add and esc to return.",
