@@ -1,84 +1,123 @@
-use std::env::current_dir;
-use std::fs::File;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use anyhow::Context;
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListState, Paragraph};
 use ratatui::Terminal;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::env::current_dir;
+use std::fs::File;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
-use serde::{Deserialize, Serialize};
 
 enum AddingModeSign {
     Positive,
-    Negative
+    Negative,
+}
+
+enum NormalFocus {
+    Increment,
+    History,
 }
 
 enum InputMode {
-    Normal,
+    Normal(NormalFocus),
     NewCounter(Input),
     Adding(Input, AddingModeSign),
 }
 
 #[derive(Serialize, Deserialize)]
-struct Counter {
-    name: String,
-    count: i64,
+enum HistoryEntry {
+    AddCounter(String),
+    RemoveCounter(String),
+    AddDelta(String, i64),
+    SetValue(String, i64),
 }
 
-impl Counter {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            count: 0,
-        }
-    }
-}
-
-impl From<&Counter> for ListItem<'_> {
-    fn from(value: &Counter) -> Self {
-        let line = Line::styled(format!("{}: {}", value.count, value.name), Color::White);
+impl From<&HistoryEntry> for ListItem<'_> {
+    fn from(entry: &HistoryEntry) -> Self {
+        let line = Line::styled(
+            match entry {
+                HistoryEntry::AddCounter(name) => format!("Added {}", name),
+                HistoryEntry::RemoveCounter(name) => format!("Removed {}", name),
+                HistoryEntry::AddDelta(name, delta) => format!("{} {}", name, delta),
+                HistoryEntry::SetValue(name, value) => format!("{} = {}", name, value),
+            },
+            Color::White,
+        );
 
         ListItem::new(line)
     }
 }
 
-struct CounterList {
-    counters: Vec<Counter>,
-    state: ListState,
-}
+struct History(Vec<HistoryEntry>);
 
-impl Default for CounterList {
-    fn default() -> Self {
-        Self {
-            counters: vec![],
-            state: Default::default(),
+impl History {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn add_entry(&mut self, entry: HistoryEntry) {
+        self.0.push(entry);
+    }
+
+    fn calculate_counter_results(&self) -> BTreeMap<String, i64> {
+        let mut counters = BTreeMap::new();
+        for history_entry in &self.0 {
+            match history_entry {
+                HistoryEntry::AddCounter(name) => {
+                    if !counters.contains_key(name) {
+                        counters.insert(name.to_owned(), 0);
+                    }
+                }
+                HistoryEntry::RemoveCounter(name) => {
+                    counters.remove(name);
+                }
+                HistoryEntry::AddDelta(name, delta) => {
+                    if let Some(value) = counters.get_mut(name) {
+                        *value += *delta;
+                    }
+                }
+                HistoryEntry::SetValue(name, new_value) => {
+                    if let Some(value) = counters.get_mut(name) {
+                        *value = *new_value;
+                    }
+                }
+            }
         }
+        counters
     }
 }
 
+struct Counter {
+    name: String,
+    value: i64,
+}
 
 enum SaveState {
     DoNotSave,
-    Save(PathBuf)
+    Save(PathBuf),
 }
 
 pub(crate) struct App {
-    counter_list: CounterList,
+    history: History,
+    history_list_state: ListState,
+    counter_list_state: ListState, // counter_list is derived from history, thus no vec.
     input_mode: InputMode,
     should_exit: bool,
     save_state: SaveState,
 }
-
 impl App {
     pub(crate) fn make_temporary() -> Self {
         Self {
-            counter_list: Default::default(),
-            input_mode: InputMode::Normal,
+            history: History::new(),
+            history_list_state: Default::default(),
+            counter_list_state: Default::default(),
+            input_mode: InputMode::Normal(NormalFocus::Increment),
             should_exit: false,
             save_state: SaveState::DoNotSave,
         }
@@ -91,20 +130,25 @@ impl App {
         let file_exists = Path::exists(&path);
 
         Ok(if file_exists {
-            let file = File::open(&path).context(format!("Failed to open file: {}", path.display()))?;
-            let counters: Vec<Counter> = serde_json::from_reader(file).context(format!("Failed to parse file: {}", path.display()))?;
+            let file =
+                File::open(&path).context(format!("Failed to open file: {}", path.display()))?;
+            let history: Vec<HistoryEntry> = serde_json::from_reader(file)
+                .context(format!("Failed to parse file: {}", path.display()))?;
 
             Self {
-                counter_list: CounterList{ counters, state: Default::default() },
-                input_mode: InputMode::Normal,
+                history: History(history),
+                history_list_state: Default::default(),
+                counter_list_state: Default::default(),
+                input_mode: InputMode::Normal(NormalFocus::Increment),
                 should_exit: false,
                 save_state: SaveState::Save(path),
             }
-        }
-        else {
+        } else {
             Self {
-                counter_list: CounterList::default(),
-                input_mode: InputMode::Normal,
+                history: History::new(),
+                history_list_state: Default::default(),
+                counter_list_state: Default::default(),
+                input_mode: InputMode::Normal(NormalFocus::Increment),
                 should_exit: false,
                 save_state: SaveState::Save(path),
             }
@@ -118,11 +162,12 @@ impl App {
 
         let file = File::create(buf).context(format!("Failed to open file: {}", buf.display()))?;
 
-        serde_json::to_writer_pretty(file, &self.counter_list.counters).context(format!("Failed to open file: {}", buf.display()))?;
+        serde_json::to_writer_pretty(file, &self.history.0)
+            .context(format!("Failed to open file: {}", buf.display()))?;
 
         Ok(())
     }
-    
+
     pub(crate) fn run(&mut self, mut terminal: Terminal<impl Backend>) -> io::Result<String> {
         let mut end_message = String::new();
 
@@ -145,108 +190,149 @@ impl App {
             return Ok(());
         }
         match &mut self.input_mode {
-            InputMode::Normal => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => self.counter_list.state.select_previous(),
-                KeyCode::Down | KeyCode::Char('j') => self.counter_list.state.select_next(),
-                KeyCode::Right | KeyCode::Char('l') => {
-                    match self.counter_list.state.selected() {
-                        Some(index) => match self.counter_list.counters.get_mut(index) {
-                            Some(counter) => counter.count += 1,
-                            None => {}
-                        },
-                        None => {}
-                    }
-                    self.save()?;
+            InputMode::Normal(normal_focus) => match (key.code, normal_focus) {
+                (KeyCode::Up | KeyCode::Char('k'), normal_focus) => match normal_focus {
+                    NormalFocus::Increment => self.counter_list_state.select_previous(),
+                    NormalFocus::History => self.history_list_state.select_previous(),
                 },
-                KeyCode::Left | KeyCode::Char(';') => {
-                    match self.counter_list.state.selected() {
-                        Some(index) => match self.counter_list.counters.get_mut(index) {
-                            Some(counter) => counter.count -= 1,
-                            None => {}
-                        },
-                        None => {}
-                    }
-                    self.save()?;
+                (KeyCode::Down | KeyCode::Char('j'), normal_focus) => match normal_focus {
+                    NormalFocus::Increment => self.counter_list_state.select_next(),
+                    NormalFocus::History => self.history_list_state.select_next(),
                 },
-                KeyCode::Char('q') => self.should_exit = true,
-                KeyCode::Char('n') => self.input_mode = InputMode::NewCounter(Input::default()),
-                KeyCode::Char('d') => {
-                    match self.counter_list.state.selected() {
+                (KeyCode::Right | KeyCode::Char('l'), NormalFocus::Increment) => {
+                    match self.counter_list_state.selected() {
                         Some(index) => {
-                            self.counter_list.counters.remove(index);
+                            let counters = self.history.calculate_counter_results();
+                            if let Some((name, value)) = counters.iter().nth(index) {
+                                self.history
+                                    .add_entry(HistoryEntry::AddDelta(name.to_owned(), 1));
+                            }
                         }
                         None => {}
                     }
                     self.save()?;
-                },
-                KeyCode::Esc => self.counter_list.state.select(None),
-                KeyCode::Char('a') => self.input_mode = InputMode::Adding(Input::default(), AddingModeSign::Positive),
-                KeyCode::Char('s') => self.input_mode = InputMode::Adding(Input::default(), AddingModeSign::Negative),
+                }
+                (KeyCode::Left | KeyCode::Char(';'), NormalFocus::Increment) => {
+                    match self.counter_list_state.selected() {
+                        Some(index) => {
+                            let counters = self.history.calculate_counter_results();
+                            if let Some((name, value)) = counters.iter().nth(index) {
+                                self.history
+                                    .add_entry(HistoryEntry::AddDelta(name.to_owned(), -1));
+                            }
+                        }
+                        None => {}
+                    }
+                    self.save()?;
+                }
+                (KeyCode::Char('q'), _) => self.should_exit = true,
+                (KeyCode::Char('n'), _) => {
+                    self.input_mode = InputMode::NewCounter(Input::default())
+                }
+                (KeyCode::Char('d'), NormalFocus::Increment) => {
+                    match self.counter_list_state.selected() {
+                        Some(index) => {
+                            let counters = self.history.calculate_counter_results();
+                            if let Some((name, value)) = counters.iter().nth(index) {
+                                self.history
+                                    .add_entry(HistoryEntry::RemoveCounter(name.to_owned()));
+                            }
+                        }
+                        None => {}
+                    }
+                    self.save()?;
+                }
+                (KeyCode::Esc, NormalFocus::Increment) => self.counter_list_state.select(None),
+                (KeyCode::Char('a'), _) => {
+                    self.input_mode = InputMode::Adding(Input::default(), AddingModeSign::Positive)
+                }
+                (KeyCode::Char('s'), _) => {
+                    self.input_mode = InputMode::Adding(Input::default(), AddingModeSign::Negative)
+                }
                 _ => {}
             },
             InputMode::NewCounter(input) => match key.code {
-                KeyCode::Esc => self.input_mode = InputMode::Normal,
+                KeyCode::Esc => self.input_mode = InputMode::Normal(NormalFocus::Increment),
                 KeyCode::Enter => {
-                    self.counter_list.counters.push(Counter::new(input.value()));
-                    input.reset();
-                    self.save()?;
+                    let counters = self.history.calculate_counter_results();
+                    if !counters.contains_key(input.value()) {
+                        self.history
+                            .add_entry(HistoryEntry::AddCounter(input.value().to_owned()));
+                        input.reset();
+                        self.save()?;
+                    }
                 }
                 _ => {
                     input.handle_event(&Event::Key(key));
                 }
             },
             InputMode::Adding(input, sign) => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => self.counter_list.state.select_previous(),
-                KeyCode::Down | KeyCode::Char('j') => self.counter_list.state.select_next(),
+                KeyCode::Up | KeyCode::Char('k') => self.counter_list_state.select_previous(),
+                KeyCode::Down | KeyCode::Char('j') => self.counter_list_state.select_next(),
                 KeyCode::Char(char) if char.is_numeric() => {
                     input.handle_event(&Event::Key(key));
-                },
+                }
                 KeyCode::Right | KeyCode::Left | KeyCode::Backspace => {
                     input.handle_event(&Event::Key(key));
                 }
-                KeyCode::Esc => self.input_mode = InputMode::Normal,
-                KeyCode::Enter => match self.counter_list.state.selected() {
+                KeyCode::Esc => self.input_mode = InputMode::Normal(NormalFocus::Increment),
+                KeyCode::Enter => match self.counter_list_state.selected() {
                     Some(index) => {
-                        match self.counter_list.counters.get_mut(index) {
-                            Some(counter) => {
-                                let value = u64::from_str(input.value()).expect("String should only have numerics");
+                        let delta =
+                            u64::from_str(input.value()).expect("String should only have numerics");
+
+                        let counters = self.history.calculate_counter_results();
+                        if let Some((name, value)) = counters.iter().nth(index) {
+                            self.history.add_entry(HistoryEntry::AddDelta(
+                                name.to_owned(),
                                 match sign {
-                                    AddingModeSign::Positive => counter.count += value as i64,
-                                    AddingModeSign::Negative => counter.count -= value as i64
-                                }
-                                input.reset();
-                                self.save()?;
-                            }
-                            None => {}
+                                    AddingModeSign::Positive => delta as i64,
+                                    AddingModeSign::Negative => (delta as i64) * -1,
+                                },
+                            ));
+
+                            input.reset();
+                            self.save()?;
                         }
-                    },
+                    }
                     None => {}
                 },
-                KeyCode::Char('a') => self.input_mode = InputMode::Adding(input.clone(), AddingModeSign::Positive),
-                KeyCode::Char('s') => self.input_mode = InputMode::Adding(input.clone(), AddingModeSign::Negative),
+                KeyCode::Char('a') => {
+                    self.input_mode = InputMode::Adding(input.clone(), AddingModeSign::Positive)
+                }
+                KeyCode::Char('s') => {
+                    self.input_mode = InputMode::Adding(input.clone(), AddingModeSign::Negative)
+                }
                 _ => {}
-            }
+            },
         }
         Ok(())
     }
 
     fn render_footer(&self, area: Rect, buf: &mut Buffer) {
-        let description = match &self.input_mode {
-            InputMode::Normal => {
-                if self.counter_list.counters.is_empty() {
-                    "Use n to make a new counter, and q to exit."
-                }
-                else {
-                    "Use ↓↑/jk to move, d to delete, ←→/l; to increment the counter, n to make a new counter, a/s to add/subtract, and q to exit."
-                }
-            }
-            InputMode::NewCounter(_) => "Type a new counter name. Use enter to add and esc to return.",
-            InputMode::Adding(_, sign) => match sign {
-                AddingModeSign::Positive => "Use ↓↑/jk to move, Type numbers, then enter to add and esc to return",
-                AddingModeSign::Negative => "Use ↓↑/jk to move, Type numbers, then enter to subtract and esc to return",
-            }
-        };
-        Paragraph::new(description).centered().render(area, buf);
+        // TODO: PROPER HELP
+        // let description = match &self.input_mode {
+        //     InputMode::Normal => {
+        //         if self.counter_list.counters.is_empty() {
+        //             "Use n to make a new counter, and q to exit."
+        //         } else {
+        //             "Use ↓↑/jk to move, d to delete, ←→/l; to increment the counter, n to make a new counter, a/s to add/subtract, and q to exit."
+        //         }
+        //     }
+        //     InputMode::NewCounter(_) => {
+        //         "Type a new counter name. Use enter to add and esc to return."
+        //     }
+        //     InputMode::Adding(_, sign) => match sign {
+        //         AddingModeSign::Positive => {
+        //             "Use ↓↑/jk to move, Type numbers, then enter to add and esc to return"
+        //         }
+        //         AddingModeSign::Negative => {
+        //             "Use ↓↑/jk to move, Type numbers, then enter to subtract and esc to return"
+        //         }
+        //     },
+        // };
+        // Paragraph::new(description).centered().render(area, buf);
+        Paragraph::new("TODO").centered().render(area, buf);
     }
 
     fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
@@ -257,10 +343,12 @@ impl App {
 
         // Iterate through all elements in the `items` and stylize them.
         let items: Vec<ListItem> = self
-            .counter_list
-            .counters
+            .history
+            .calculate_counter_results()
             .iter()
-            .map(|counter| ListItem::from(counter))
+            .map(|(name, value)| {
+                ListItem::new(Line::styled(format!("{}: {}", name, value), Color::White))
+            })
             .collect();
 
         // Create a List from all list items and highlight the currently selected one
@@ -272,12 +360,38 @@ impl App {
 
         // We need to disambiguate this trait method as both `Widget` and `StatefulWidget` share the
         // same method name `render`.
-        StatefulWidget::render(list, area, buf, &mut self.counter_list.state);
+        StatefulWidget::render(list, area, buf, &mut self.counter_list_state);
+    }
+
+    pub(crate) fn render_history(&mut self, area: Rect, buf: &mut Buffer) {
+        let block = Block::new()
+            .title(Line::raw("History").centered())
+            .borders(Borders::all())
+            .border_set(symbols::border::ROUNDED);
+
+        // Iterate through all elements in the `items` and stylize them.
+        let items: Vec<ListItem> = self
+            .history
+            .0
+            .iter()
+            .map(|entry| ListItem::from(entry))
+            .collect();
+
+        // Create a List from all list items and highlight the currently selected one
+        let list = List::new(items)
+            .block(block)
+            //.highlight_style(SELECTED_STYLE)
+            .highlight_symbol(">")
+            .highlight_spacing(HighlightSpacing::Always);
+
+        // We need to disambiguate this trait method as both `Widget` and `StatefulWidget` share the
+        // same method name `render`.
+        StatefulWidget::render(list, area, buf, &mut self.history_list_state);
     }
 
     fn render_input(&mut self, area: Rect, buf: &mut Buffer) {
         match &self.input_mode {
-            InputMode::Normal => {}
+            InputMode::Normal(_) => {}
             InputMode::NewCounter(input) => {
                 let block = Block::new()
                     .title(Line::raw("New Counter").centered())
@@ -291,10 +405,13 @@ impl App {
             }
             InputMode::Adding(input, sign) => {
                 let block = Block::new()
-                    .title(Line::raw(match sign {
-                        AddingModeSign::Positive => "Adding",
-                        AddingModeSign::Negative => "Subtracting"
-                    }).centered())
+                    .title(
+                        Line::raw(match sign {
+                            AddingModeSign::Positive => "Adding",
+                            AddingModeSign::Negative => "Subtracting",
+                        })
+                        .centered(),
+                    )
                     .borders(Borders::all())
                     .border_set(symbols::border::ROUNDED);
 
@@ -312,12 +429,16 @@ impl Widget for &mut App {
         let [main_area, footer_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
 
+        let [counters_area, history_area] =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(main_area);
+
         let [adding_area, list_area] =
             Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(main_area);
 
-        match self.input_mode {
-            InputMode::Normal => {
-                self.render_list(main_area, buf);
+        match &self.input_mode {
+            InputMode::Normal(normal_focus) => {
+                self.render_list(counters_area, buf);
+                self.render_history(history_area, buf);
             }
             InputMode::NewCounter(_) => {
                 self.render_input(adding_area, buf);
